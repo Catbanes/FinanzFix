@@ -1,0 +1,158 @@
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rechnungsleser PRO Ultimate</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    body { font-family: Arial; margin: 20px; background: #eef1f5; }
+    textarea, input { width: 100%; padding: 10px; margin: 8px 0; font-size: 16px; border-radius: 4px; border: 1px solid #ccc; }
+    button { padding: 10px; background: #007acc; color: white; border: none; border-radius: 4px; margin: 5px 5px 5px 0; cursor: pointer; }
+    .buchung, .archivItem { background: #fff; padding: 10px; margin-top: 10px; border-left: 4px solid #007acc; border-radius: 4px; }
+    .konto { margin-left: 15px; }
+    h2 { color: #004080; }
+    #preview { max-width: 100%; margin-top: 10px; border-radius: 4px; display: none; }
+  </style>
+</head>
+<body>
+  <h2>Rechnungsleser PRO Ultimate</h2>
+
+  <input type="file" id="imageInput" accept="image/*" onchange="readImage()" />
+  <img id="preview" />
+  <textarea id="aufgabe" placeholder="Text erscheint automatisch oder kann eingegeben werden."></textarea>
+  <button onclick="verarbeiteRechnung()">Buchungssatz erzeugen</button>
+  <button onclick="zeigeArchiv()">Archiv anzeigen</button>
+  <button onclick="exportCSV()">Export als CSV</button>
+  <button onclick="exportPDF()">Export als PDF</button>
+
+  <div id="output"></div>
+  <div id="archiv" style="margin-top: 20px;"></div>
+
+  <script>
+    let lastImageBase64 = "";
+
+    async function readImage() {
+      const file = document.getElementById("imageInput").files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        document.getElementById("preview").src = e.target.result;
+        document.getElementById("preview").style.display = "block";
+        lastImageBase64 = e.target.result;
+      };
+      reader.readAsDataURL(file);
+
+      const result = await Tesseract.recognize(file, 'deu');
+      document.getElementById("aufgabe").value = result.data.text;
+    }
+
+    function verarbeiteRechnung() {
+      const text = document.getElementById("aufgabe").value.toLowerCase();
+      const output = document.getElementById("output");
+      output.innerHTML = "";
+
+      const bruttoMatch = text.match(/(gesamtbetrag|betrag|summe).*?([\d\.\s]+,[\d]{2}) ?€?/);
+      const ustMatch = text.match(/(mwst|ust|umsatzsteuer).*?([\d\.\s]+,[\d]{2}) ?€?/);
+      const nettoMatch = text.match(/(netto).*?([\d\.\s]+,[\d]{2}) ?€?/);
+
+      const beschreibung = getKontoTyp(text);
+
+      function toFloat(str) {
+        return parseFloat(str.replace(/[\.\s]/g, "").replace(",", "."));
+      }
+
+      if ((bruttoMatch && ustMatch) || (nettoMatch && ustMatch)) {
+        let brutto, ust, netto;
+
+        if (bruttoMatch && ustMatch) {
+          brutto = toFloat(bruttoMatch[2]);
+          ust = toFloat(ustMatch[2]);
+          netto = brutto - ust;
+        } else {
+          netto = toFloat(nettoMatch[2]);
+          ust = toFloat(ustMatch[2]);
+          brutto = netto + ust;
+        }
+
+        const buchungHTML = `<div class='buchung'><strong>${beschreibung}</strong>
+          <div class='konto'>Soll: ${beschreibung} ${netto.toFixed(2)} €</div>
+          <div class='konto'>Soll: 1576 Vorsteuer ${ust.toFixed(2)} €</div>
+          <div class='konto'>Haben: 1600 Verbindlichkeiten ${brutto.toFixed(2)} €</div>
+        </div>`;
+        output.innerHTML = buchungHTML;
+        speichereArchiv(beschreibung, netto.toFixed(2), ust.toFixed(2), brutto.toFixed(2), lastImageBase64);
+      } else {
+        output.innerHTML = "<p><strong>Hinweis:</strong> Kein vollständiger Betrag erkannt.</p>";
+      }
+    }
+
+    function getKontoTyp(text) {
+      if (text.includes("leasing") || text.includes("miete")) return "6300 Leasing / Miete";
+      if (text.includes("werkstatt") || text.includes("reparatur")) return "6200 Reparaturaufwand";
+      if (text.includes("dienstleistung") || text.includes("beratung")) return "6100 Fremdleistungen";
+      if (text.includes("büro") || text.includes("papier") || text.includes("drucker")) return "6800 Bürobedarf";
+      return "6000 Wareneingang";
+    }
+
+    function speichereArchiv(konto, netto, ust, brutto, base64img) {
+      const eintrag = {
+        zeit: new Date().toLocaleString(),
+        konto, netto, ust, brutto,
+        bild: base64img
+      };
+      let einträge = JSON.parse(localStorage.getItem("buchungsArchiv") || "[]");
+      einträge.unshift(eintrag);
+      localStorage.setItem("buchungsArchiv", JSON.stringify(einträge.slice(0, 10)));
+    }
+
+    function zeigeArchiv() {
+      const archivDiv = document.getElementById("archiv");
+      const einträge = JSON.parse(localStorage.getItem("buchungsArchiv") || "[]");
+      if (!einträge.length) {
+        archivDiv.innerHTML = "<p>Kein Verlauf vorhanden.</p>";
+        return;
+      }
+
+      archivDiv.innerHTML = "<h3>Archiv</h3>" + einträge.map(e => `
+        <div class='archivItem'>
+          <strong>${e.konto}</strong> – ${e.zeit}<br/>
+          Soll: ${e.konto} ${e.netto} €<br/>
+          Soll: 1576 Vorsteuer ${e.ust} €<br/>
+          Haben: 1600 Verbindlichkeiten ${e.brutto} €<br/>
+          ${e.bild ? `<img src='${e.bild}' style='max-width:100px;margin-top:5px;border-radius:4px;'/>` : ""}
+        </div>`).join("");
+    }
+
+    function exportCSV() {
+      const daten = JSON.parse(localStorage.getItem("buchungsArchiv") || "[]");
+      const rows = [["Datum", "Konto", "Netto", "USt", "Brutto"]];
+      daten.forEach(e => rows.push([e.zeit, e.konto, e.netto, e.ust, e.brutto]));
+      const csv = rows.map(r => r.join(";")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "buchungen.csv";
+      link.click();
+    }
+
+    async function exportPDF() {
+      const daten = JSON.parse(localStorage.getItem("buchungsArchiv") || "[]");
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF();
+      let y = 10;
+      daten.forEach((e, i) => {
+        doc.text(`${e.konto} (${e.zeit})`, 10, y); y += 7;
+        doc.text(`Soll: ${e.konto} ${e.netto} €`, 10, y); y += 7;
+        doc.text(`Soll: 1576 Vorsteuer ${e.ust} €`, 10, y); y += 7;
+        doc.text(`Haben: 1600 Verbindlichkeiten ${e.brutto} €`, 10, y); y += 10;
+        if (y > 270 && i < daten.length - 1) { doc.addPage(); y = 10; }
+      });
+      doc.save("buchungen.pdf");
+    }
+  </script>
+</body>
+</html>
